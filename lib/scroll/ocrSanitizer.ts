@@ -66,7 +66,7 @@ const appCatalog = [
   { display: "Facebook", variants: ["facebook", "fb", "เฟซบุ๊ก", "เฟสบุ๊ค"] },
   { display: "X", variants: ["x", "twitter", "ทวิตเตอร์"] },
   { display: "Threads", variants: ["threads", "เธรดส์"] },
-  { display: "Xiaohongshu", variants: ["xiaohongshu", "red", "小红书", "小紅書", "little red book"] },
+  { display: "Xiaohongshu", variants: ["xiaohongshu", "red", "rednote", "red note", "小红书", "小紅書", "little red book"] },
   { display: "LINE", variants: ["line", "ไลน์"] },
   { display: "Telegram", variants: ["telegram", "เทเลแกรม"] },
   { display: "WhatsApp", variants: ["whatsapp", "what's app", "วอตส์แอป", "วอทส์แอป"] },
@@ -552,7 +552,10 @@ function buildLine(text: string, maxHours: number, labels: ScopeLabels): ScreenT
     return { text, durations: [], durationOnly: false, scope: null, categoryPairs: [], appRow: null, nameKind: null, categoryNameKind: null, appName: null, pairedTotal: null, claimed: false };
   }
   const durations = findDurations(text, maxHours);
-  const scope = totalScopeFromText(text, labels);
+  // Comparison furniture ("⬇ 25% from last week", 比上周下降25%) contains
+  // scope words but is never a totals label — a percentage disqualifies
+  // the line from label duty (no real average/total label carries one).
+  const scope = /\d\s*%/.test(text) ? null : totalScopeFromText(text, labels);
   const categoryPairs = durations.length > 0 ? categoryPairsFromLine(text, durations) : [];
   const appRow = appRowFromLine(text, durations, categoryPairs, scope);
 
@@ -749,9 +752,15 @@ function sameLineAnchoredHours(line: ScreenTimeLine, scope: TotalScope, labels: 
   return null;
 }
 
-// Label-anchored total: same line first, then the value zip-paired to the
-// label, then the nearest unclaimed duration-only line below (composite
-// "Nh Mm" values outrank bare chart-axis style tokens like "6h").
+// Label-anchored total, in trust order: value on the label's own line ->
+// value zip-paired to the label -> a composite value leading the ADJACENT
+// line (headline values are often polluted by delta text like
+// "5h 20m ⬇ 25% from last week", which fails the duration-only check) ->
+// a composite duration-only line in the window. Chart furniture (bare
+// axis ticks "10h"/"12小时", "avg"/平均, "0") can never win: axis ticks are
+// bare, never composite, and label words alone carry no value. If no
+// anchored pair exists the caller fails to manual — a floating fragment
+// is never promoted.
 function resolveAnchoredTotal(lines: ScreenTimeLine[], scope: TotalScope, labels: ScopeLabels) {
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
@@ -764,15 +773,25 @@ function resolveAnchoredTotal(lines: ScreenTimeLine[], scope: TotalScope, labels
 
     if (line.pairedTotal !== null) return line.pairedTotal;
 
+    const next = lines[index + 1];
+    if (next && !next.claimed && next.categoryPairs.length === 0 && next.durations.length > 0) {
+      const adjacent = next.durations.find((duration) => duration.hours !== null);
+      if (adjacent && adjacent.composite) {
+        // Leading-value check: app rows and total rows put text BEFORE the
+        // duration; a headline value leads its line.
+        const prefix = next.text.slice(0, adjacent.index).replace(/[^\p{L}\p{N}]/gu, "");
+        if (prefix.length <= 1) return adjacent.hours;
+      }
+    }
+
     const candidates: DurationMatch[] = [];
     for (let offset = 1; offset <= 8 && index + offset < lines.length; offset += 1) {
       const candidate = lines[index + offset];
       if (!candidate.durationOnly || candidate.claimed) continue;
-      const firstValid = candidate.durations.find((duration) => duration.hours !== null);
-      if (firstValid) candidates.push(firstValid);
+      const firstComposite = candidate.durations.find((duration) => duration.hours !== null && duration.composite);
+      if (firstComposite) candidates.push(firstComposite);
     }
-    const preferred = candidates.find((candidate) => candidate.composite) ?? candidates[0];
-    if (preferred && preferred.hours !== null) return preferred.hours;
+    if (candidates.length > 0 && candidates[0].hours !== null) return candidates[0].hours;
   }
 
   return null;
@@ -817,17 +836,17 @@ export function sanitizeParsedResult(parsed: RawParsedScreenTime): ParsedScreenT
   // App rows share the ratio total's scope (weekly rows on a week view),
   // so the plausibility cap follows totalHours when present.
   const maxAppMinutes = (totalHours ? Math.round(totalHours * 60) : totalMinutes) ?? 8 * 60;
-  const seen = new Set<string>();
-
-  const apps = parsed.apps
-    .map((app): AppRoast | null => {
-      const canonical = canonicalAppName(app.rawName);
-      if (!canonical || seen.has(canonical)) return null;
-      if (!Number.isFinite(app.minutes) || app.minutes <= 0 || app.minutes > 16 * 60 || app.minutes > maxAppMinutes) return null;
-      seen.add(canonical);
-      return { name: canonical, minutes: app.minutes };
-    })
-    .filter((app): app is AppRoast => app !== null)
+  // Duplicate canonical names keep the LARGEST minutes: iOS "Limits" rows
+  // ("Instagram 1 hr") would otherwise shadow the real usage row.
+  const byName = new Map<string, number>();
+  for (const app of parsed.apps) {
+    const canonical = canonicalAppName(app.rawName);
+    if (!canonical) continue;
+    if (!Number.isFinite(app.minutes) || app.minutes <= 0 || app.minutes > 16 * 60 || app.minutes > maxAppMinutes) continue;
+    byName.set(canonical, Math.max(byName.get(canonical) ?? 0, app.minutes));
+  }
+  const apps = [...byName.entries()]
+    .map(([name, minutes]) => ({ name, minutes }))
     .sort((a, b) => b.minutes - a.minutes)
     .slice(0, 3);
 

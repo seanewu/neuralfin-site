@@ -30,9 +30,21 @@
   day words must not anchor scopes and their clock times ("09:51") must
   never parse as durations — a real device promoted 更新于：今天 09:51 to a
   9h51m day headline before this guard.
-- Chart-axis tokens ("12 小时"/"12h" y-axis caps) are bare; label pairing
-  prefers composite values so an axis token can never displace the
-  average/total value.
+- Chart furniture can never become a value. Anchoring trust order for a
+  label: same-line value → zip-paired value → a composite value LEADING the
+  adjacent line (headline values are often polluted by delta text —
+  "5h 20m ⬇ 25% from last week" — and fail the duration-only check) → a
+  composite duration-only line in the window. Bare tokens (axis ticks
+  "10h"/"12小时", "0") are never composite so never eligible; "avg"/平均
+  dashed-line labels carry no value; lines containing a percentage
+  (comparison furniture) are disqualified from label duty. If no anchored
+  pair exists, the parse fails to manual — a floating fragment is never
+  promoted, and the verified badge can only ever fire on an anchored
+  average/weekly value. Known tradeoff: a bare-minutes headline on its own
+  line ("45m") without a same-line/zip anchor is not promotable either.
+- iOS "Limits" rows duplicate app names ("Instagram 1 hr"); duplicate
+  canonical apps keep the LARGEST minutes so a limit row never shadows the
+  usage row.
 - Category taxonomy (audited across Apple + Android in en/zh-Hant/zh-Hans/
   th): scroll = Social, Video, Entertainment, Games. Excluded, with joined
   names as single units: Productivity & Finance (效率与财务/生產力與財務/

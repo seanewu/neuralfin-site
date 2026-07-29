@@ -542,3 +542,57 @@ test("app-list-only zh screenshot: roasts populate, headline stays null", () => 
   ]); // Kingshot/和平精英/携程旅行/微信读书 uncatalogued — dropped, not fuzzy-matched
   assert.equal(classifyParseOutcome(parsed), "failed");
 });
+
+// Fixture #7 — English iOS WEEK view (real-device): chart y-axis furniture
+// (10h tick, "avg" dashed-line label, 0), the headline value polluted by
+// the delta text, weekly legend, and the weekly grand total. A real device
+// promoted the 10h AXIS TICK to a VERIFIED headline here.
+const IOS_EN_WEEK_FIXTURE = [
+  "All Devices Devices",
+  "Week Day",
+  "Screen Time",
+  "Daily Average",
+  "5h 20m © 25% from last week",
+  "10h",
+  "avg",
+  "0",
+  "S M T W T F S",
+  "Social Entertainment Creativity",
+  "14h 49m 1h 7m 54m",
+  "Total Screen Time 21h 23m",
+  "Updated today at 10:21 AM",
+].join("\n");
+
+test("en iOS week view: Daily Average beats the axis tick, week ratio, badge path", () => {
+  const parsed = parseScreenTimeText(IOS_EN_WEEK_FIXTURE, 88);
+
+  assert.equal(parsed.source, "average");
+  assert.equal(Math.round((parsed.hours ?? 0) * 60), 320); // 5h 20m
+  assert.notEqual(Math.round((parsed.hours ?? 0) * 60), 600); // never the 10h tick
+  assert.deepEqual(parsed.flags, []); // verified-eligible ONLY on the anchored value
+  assert.equal(parsed.ratioScope, "week");
+  assert.equal(Math.round((parsed.scrollHours ?? 0) * 60), 956); // Social 14h49m + Entertainment 1h7m
+  assert.equal(Math.round((parsed.totalHours ?? 0) * 60), 1283); // Total Screen Time 21h 23m
+});
+
+test("axis ticks are never promotable: garbled value line fails to manual", () => {
+  // The delta line ("© 25% from last week") is comparison furniture, not a
+  // weekly label; with the true value unreadable there is no anchored pair
+  // and NO source — nothing the badge could fire on.
+  const parsed = parseScreenTimeText(["Daily Average", "© 25% from last week", "10h", "avg", "0"].join("\n"), 88);
+  assert.equal(parsed.hours, null);
+  assert.equal(parsed.source, null);
+});
+
+test("rednote resolves to the Xiaohongshu entry; Limits rows never shadow usage", () => {
+  const parsed = parseScreenTimeText(
+    ["Limits", "Instagram 1 hr", "Most Used Show Categories", "Instagram 7h 2m", "rednote 48m", "Photos 35m"].join("\n"),
+    88,
+  );
+  assert.deepEqual(parsed.apps, [
+    { name: "Instagram", minutes: 422 }, // max of the 1hr limit row and 7h2m usage
+    { name: "Xiaohongshu", minutes: 48 },
+    { name: "Photos", minutes: 35 },
+  ]);
+  assert.equal(parsed.hours, null); // app-list-only: still no headline promotion
+});
