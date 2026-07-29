@@ -93,6 +93,12 @@ export function recordScrollTelemetryEvent(event: string) {
   fireAndForget(() => telemetryStorage.increment(`event:${event}`));
 }
 
+// Which in-app browser a parse ran in (enum only) — tells us which webview
+// environments degrade and need attention. Same anonymity contract.
+export function recordScrollWebviewTelemetry(env: string, outcome: ParseOutcome) {
+  fireAndForget(() => telemetryStorage.increment(`webview:${env}:${outcome}`));
+}
+
 export async function buildScrollTelemetrySummary(): Promise<Record<string, number>> {
   try {
     return await telemetryStorage.snapshot();
