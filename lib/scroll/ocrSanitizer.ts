@@ -26,6 +26,10 @@ export type ParsedScreenTime = {
   confidence: number;
   layout: ScreenTimeLayout;
   flags: ParseFlag[];
+  // Scope of the scrollHours/totalHours ratio pair (null when no ratio).
+  // Week ratios pair weekly categories with the weekly grand total; the
+  // slider (hours) still carries the daily average.
+  ratioScope: "day" | "week" | null;
 };
 
 type RawAppLine = {
@@ -42,6 +46,10 @@ type RawParsedScreenTime = {
   confidence: number;
   layout?: ScreenTimeLayout;
   flags?: ParseFlag[];
+  ratioScope?: "day" | "week" | null;
+  // day paths drive the slider from scroll time ("count your scroll");
+  // average/weekly paths keep the headline on the slider.
+  sliderFromScroll?: boolean;
 };
 
 export const SCREEN_TIME_LAYOUTS = ["samsung", "pixel", "ios", "unknown"] as const;
@@ -58,7 +66,7 @@ const appCatalog = [
   { display: "Facebook", variants: ["facebook", "fb", "เฟซบุ๊ก", "เฟสบุ๊ค"] },
   { display: "X", variants: ["x", "twitter", "ทวิตเตอร์"] },
   { display: "Threads", variants: ["threads", "เธรดส์"] },
-  { display: "Xiaohongshu", variants: ["xiaohongshu", "red", "小红书", "小紅書", "little red book"] },
+  { display: "Xiaohongshu", variants: ["xiaohongshu", "red", "rednote", "red note", "小红书", "小紅書", "little red book"] },
   { display: "LINE", variants: ["line", "ไลน์"] },
   { display: "Telegram", variants: ["telegram", "เทเลแกรม"] },
   { display: "WhatsApp", variants: ["whatsapp", "what's app", "วอตส์แอป", "วอทส์แอป"] },
@@ -88,6 +96,14 @@ const excludedCategoryCatalog = [
   "productivity & finance",
   "productivity and finance",
   "information and reading",
+  "shopping & food",
+  "shopping and food",
+  "shopping",
+  "food & drink",
+  "health & fitness",
+  "health and fitness",
+  "health",
+  "fitness",
   "travel",
   "navigation",
   "creativity",
@@ -112,6 +128,22 @@ const excludedCategoryCatalog = [
   "创意",
   "資訊",
   "信息",
+  "資訊與閱讀",
+  "信息与阅读",
+  "購物與美食",
+  "购物与美食",
+  "購物",
+  "购物",
+  "美食",
+  "健康與健身",
+  "健康与健身",
+  "健身",
+  "健康",
+  "生產力與財務",
+  "效率与财务",
+  "效率與財務",
+  "工作效率",
+  "旅遊",
   "閱讀",
   "阅读",
   "教育",
@@ -134,6 +166,14 @@ const excludedCategoryCatalog = [
   "ยูทิลิตี้",
   "การสื่อสาร",
   "อื่นๆ",
+  "ช็อปปิ้งและอาหาร",
+  "การช็อปปิ้งและอาหาร",
+  "ช็อปปิ้ง",
+  "สุขภาพและฟิตเนส",
+  "ฟิตเนส",
+  "สุขภาพ",
+  "ประสิทธิภาพและการเงิน",
+  "ข้อมูลและการอ่าน",
 ] as const;
 
 type CategoryKind = (typeof SCROLL_CATEGORIES)[number] | "excluded";
@@ -155,6 +195,37 @@ const TOTAL_LABELS: Record<TotalScope, RegExp[]> = {
 };
 
 const TOTAL_SCOPES: TotalScope[] = ["average", "weekly", "day"];
+
+// "Total screen time" is scope-dependent: the weekly grand total on a week
+// view, the day total on a day view. Assigned per parse via resolveLabels.
+const GRAND_TOTAL_LABELS = [
+  /\b(?:total\s+screen\s+time)\b/i,
+  /(?:總屏幕時間|总屏幕时间|螢幕使用時間總計|屏幕使用时间总计|เวลาหน้าจอทั้งหมด|เวลาหน้าจอรวม)/,
+];
+
+// Week-view detection. iOS only shows a "daily average" headline on the
+// week view, so average labels are themselves a week signal; the 每周/每週
+// tab text and explicit weekly labels are the rest. (Both tab captions
+// appear in OCR regardless of which is active — combined with the average
+// label they are decisive.)
+const WEEK_VIEW_HINT =
+  /\b(?:week|weekly|daily\s+average)\b|每周|每週|本週|本周|週總計|周总计|日均|每日平均|รายสัปดาห์|สัปดาห์|เฉลี่ยต่อวัน/i;
+
+// Update-timestamp metadata ("更新于：今天 09:51", "Updated today at 9:41")
+// must never contribute labels or durations: 今天 would anchor a day scope
+// and the clock time parses as a colon duration.
+const METADATA_LINE =
+  /更新于|更新於|上次更新|\bupdated\b|\blast\s+update|อัปเดตล่าสุด|อัปเดตเมื่อ/i;
+
+type ScopeLabels = Record<TotalScope, RegExp[]>;
+
+function resolveLabels(isWeekView: boolean): ScopeLabels {
+  return {
+    average: TOTAL_LABELS.average,
+    weekly: isWeekView ? [...TOTAL_LABELS.weekly, ...GRAND_TOTAL_LABELS] : TOTAL_LABELS.weekly,
+    day: isWeekView ? TOTAL_LABELS.day : [...TOTAL_LABELS.day, ...GRAND_TOTAL_LABELS],
+  };
+}
 
 const BLOCKED_APP_ROW =
   /screen time|digital wellbeing|settings|average|avg|daily|total|all apps|pickups|notifications|螢幕|屏幕|平均|每日|總計|总计|ทั้งหมด|เฉลี่ย|หน้าจอ/i;
@@ -394,9 +465,9 @@ function isAppOrCategoryContext(text: string) {
   return Boolean(label && (canonicalAppName(label) || categoryKindFromText(label)));
 }
 
-function totalScopeFromText(text: string): TotalScope | null {
+function totalScopeFromText(text: string, labels: ScopeLabels): TotalScope | null {
   for (const scope of TOTAL_SCOPES) {
-    if (TOTAL_LABELS[scope].some((label) => label.test(text))) return scope;
+    if (labels[scope].some((label) => label.test(text))) return scope;
   }
   return null;
 }
@@ -474,9 +545,17 @@ function appRowFromLine(text: string, durations: DurationMatch[], categoryPairs:
   return { rawName, minutes: Math.round(firstValid.hours * 60) };
 }
 
-function buildLine(text: string, maxHours: number): ScreenTimeLine {
+function buildLine(text: string, maxHours: number, labels: ScopeLabels): ScreenTimeLine {
+  if (METADATA_LINE.test(text)) {
+    // Inert: update timestamps carry day words and clock times that must
+    // not become anchors or durations.
+    return { text, durations: [], durationOnly: false, scope: null, categoryPairs: [], appRow: null, nameKind: null, categoryNameKind: null, appName: null, pairedTotal: null, claimed: false };
+  }
   const durations = findDurations(text, maxHours);
-  const scope = totalScopeFromText(text);
+  // Comparison furniture ("⬇ 25% from last week", 比上周下降25%) contains
+  // scope words but is never a totals label — a percentage disqualifies
+  // the line from label duty (no real average/total label carries one).
+  const scope = /\d\s*%/.test(text) ? null : totalScopeFromText(text, labels);
   const categoryPairs = durations.length > 0 ? categoryPairsFromLine(text, durations) : [];
   const appRow = appRowFromLine(text, durations, categoryPairs, scope);
 
@@ -561,7 +640,7 @@ function zipNameValueRuns(lines: ScreenTimeLine[], onPair: (unit: NameUnit, hour
       const units = nameUnitsFromPending(pending);
       // Dropped (null) tokens still occupy their position so alignment
       // survives; their pair simply produces nothing (tile dropped).
-      const durations = values.flatMap((value) => value.durations.map((d) => ({ line: value, hours: d.hours })));
+      const durations = values.flatMap((value) => value.durations.map((d) => ({ line: value, hours: d.hours, composite: d.composite })));
 
       // Count guard for tile runs: one missing/extra token would shift
       // every pair after it, so positional zipping is only trusted when
@@ -572,6 +651,25 @@ function zipNameValueRuns(lines: ScreenTimeLine[], onPair: (unit: NameUnit, hour
       const categoryUnitCount = units.filter((unit) => unit.type === "category").length;
       if (categoryUnitCount > 0 && durations.length !== units.length && durations.length !== categoryUnitCount) {
         onFlag("tile_count_mismatch");
+        for (const value of values) value.claimed = true;
+        pending = [];
+        continue;
+      }
+
+      // Label-only runs with extra durations: the extras are chart-axis
+      // style tokens ("12 小时"), which are bare — pair labels with
+      // composite values first, in order, and claim the whole run so an
+      // axis token can never be promoted later.
+      const labelOnly = units.length > 0 && units.every((unit) => unit.type === "label");
+      if (labelOnly && durations.length > units.length) {
+        const order = durations
+          .map((value, position) => ({ value, position }))
+          .sort((x, y) => Number(y.value.hours !== null && y.value.composite) - Number(x.value.hours !== null && x.value.composite) || x.position - y.position);
+        units.forEach((unit, position) => {
+          const chosen = order[position];
+          if (!chosen) return;
+          if (chosen.value.hours !== null) onPair(unit, chosen.value.hours);
+        });
         for (const value of values) value.claimed = true;
         pending = [];
         continue;
@@ -597,12 +695,12 @@ function zipNameValueRuns(lines: ScreenTimeLine[], onPair: (unit: NameUnit, hour
   }
 }
 
-function analyzeScreenTime(rawText: string, maxHours: number) {
+function analyzeScreenTime(rawText: string, maxHours: number, labels: ScopeLabels) {
   const lines = rawText
     .split(/\r?\n/)
     .map((line) => normalizeOcrText(line))
     .filter(Boolean)
-    .map((line) => buildLine(line, maxHours));
+    .map((line) => buildLine(line, maxHours, labels));
 
   const apps: RawAppLine[] = [];
   const categoryMinutes = new Map<CategoryKind, number>();
@@ -641,8 +739,8 @@ function analyzeScreenTime(rawText: string, maxHours: number) {
   return { lines, apps, scrollHours: scrollMinutes > 0 ? scrollMinutes / 60 : null, flags };
 }
 
-function sameLineAnchoredHours(line: ScreenTimeLine, scope: TotalScope) {
-  for (const label of TOTAL_LABELS[scope]) {
+function sameLineAnchoredHours(line: ScreenTimeLine, scope: TotalScope, labels: ScopeLabels) {
+  for (const label of labels[scope]) {
     const match = label.exec(line.text);
     if (!match) continue;
     const afterLabel = match.index + match[0].length;
@@ -654,30 +752,46 @@ function sameLineAnchoredHours(line: ScreenTimeLine, scope: TotalScope) {
   return null;
 }
 
-// Label-anchored total: same line first, then the value zip-paired to the
-// label, then the nearest unclaimed duration-only line below (composite
-// "Nh Mm" values outrank bare chart-axis style tokens like "6h").
-function resolveAnchoredTotal(lines: ScreenTimeLine[], scope: TotalScope) {
+// Label-anchored total, in trust order: value on the label's own line ->
+// value zip-paired to the label -> a composite value leading the ADJACENT
+// line (headline values are often polluted by delta text like
+// "5h 20m ⬇ 25% from last week", which fails the duration-only check) ->
+// a composite duration-only line in the window. Chart furniture (bare
+// axis ticks "10h"/"12小时", "avg"/平均, "0") can never win: axis ticks are
+// bare, never composite, and label words alone carry no value. If no
+// anchored pair exists the caller fails to manual — a floating fragment
+// is never promoted.
+function resolveAnchoredTotal(lines: ScreenTimeLine[], scope: TotalScope, labels: ScopeLabels) {
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
     if (line.scope !== scope) continue;
 
     if (line.durations.length > 0 && line.appRow === null && line.categoryPairs.length === 0) {
-      const sameLine = sameLineAnchoredHours(line, scope);
+      const sameLine = sameLineAnchoredHours(line, scope, labels);
       if (sameLine !== null) return sameLine;
     }
 
     if (line.pairedTotal !== null) return line.pairedTotal;
 
+    const next = lines[index + 1];
+    if (next && !next.claimed && next.categoryPairs.length === 0 && next.durations.length > 0) {
+      const adjacent = next.durations.find((duration) => duration.hours !== null);
+      if (adjacent && adjacent.composite) {
+        // Leading-value check: app rows and total rows put text BEFORE the
+        // duration; a headline value leads its line.
+        const prefix = next.text.slice(0, adjacent.index).replace(/[^\p{L}\p{N}]/gu, "");
+        if (prefix.length <= 1) return adjacent.hours;
+      }
+    }
+
     const candidates: DurationMatch[] = [];
     for (let offset = 1; offset <= 8 && index + offset < lines.length; offset += 1) {
       const candidate = lines[index + offset];
       if (!candidate.durationOnly || candidate.claimed) continue;
-      const firstValid = candidate.durations.find((duration) => duration.hours !== null);
-      if (firstValid) candidates.push(firstValid);
+      const firstComposite = candidate.durations.find((duration) => duration.hours !== null && duration.composite);
+      if (firstComposite) candidates.push(firstComposite);
     }
-    const preferred = candidates.find((candidate) => candidate.composite) ?? candidates[0];
-    if (preferred && preferred.hours !== null) return preferred.hours;
+    if (candidates.length > 0 && candidates[0].hours !== null) return candidates[0].hours;
   }
 
   return null;
@@ -706,28 +820,33 @@ export function classifyParseOutcome(parsed: ParsedScreenTime): ParseOutcome {
 }
 
 export function sanitizeParsedResult(parsed: RawParsedScreenTime): ParsedScreenTime {
+  const ratioScope = parsed.ratioScope ?? (parsed.scrollHours != null ? "day" : null);
+  const ratioMaxHours = ratioScope === "week" ? 168 : 12;
   const headlineHours = parsed.hours !== null && parsed.hours >= 0.5 && parsed.hours <= 12 ? parsed.hours : null;
-  const totalHours = parsed.totalHours != null && parsed.totalHours >= 0.5 && parsed.totalHours <= 12 ? parsed.totalHours : null;
-  const candidateScrollHours = parsed.scrollHours != null && parsed.scrollHours >= 0.5 && parsed.scrollHours <= 12 ? parsed.scrollHours : null;
+  const totalHours = parsed.totalHours != null && parsed.totalHours >= 0.5 && parsed.totalHours <= ratioMaxHours ? parsed.totalHours : null;
+  const candidateScrollHours = parsed.scrollHours != null && parsed.scrollHours >= 0.5 && parsed.scrollHours <= ratioMaxHours ? parsed.scrollHours : null;
   const exceedsHeadline = Boolean(
     candidateScrollHours && totalHours && Math.round(candidateScrollHours * 60) > Math.round(totalHours * 60),
   );
   const scrollHours = candidateScrollHours && !exceedsHeadline ? candidateScrollHours : null;
-  const hours = scrollHours ?? headlineHours;
+  const sliderFromScroll = parsed.sliderFromScroll ?? true;
+  const hours = sliderFromScroll ? scrollHours ?? headlineHours : headlineHours ?? scrollHours;
   const source = hours ? parsed.source : null;
   const totalMinutes = hours ? Math.round(hours * 60) : null;
-  const maxAppMinutes = totalMinutes ?? 8 * 60;
-  const seen = new Set<string>();
-
-  const apps = parsed.apps
-    .map((app): AppRoast | null => {
-      const canonical = canonicalAppName(app.rawName);
-      if (!canonical || seen.has(canonical)) return null;
-      if (!Number.isFinite(app.minutes) || app.minutes <= 0 || app.minutes > 16 * 60 || app.minutes > maxAppMinutes) return null;
-      seen.add(canonical);
-      return { name: canonical, minutes: app.minutes };
-    })
-    .filter((app): app is AppRoast => app !== null)
+  // App rows share the ratio total's scope (weekly rows on a week view),
+  // so the plausibility cap follows totalHours when present.
+  const maxAppMinutes = (totalHours ? Math.round(totalHours * 60) : totalMinutes) ?? 8 * 60;
+  // Duplicate canonical names keep the LARGEST minutes: iOS "Limits" rows
+  // ("Instagram 1 hr") would otherwise shadow the real usage row.
+  const byName = new Map<string, number>();
+  for (const app of parsed.apps) {
+    const canonical = canonicalAppName(app.rawName);
+    if (!canonical) continue;
+    if (!Number.isFinite(app.minutes) || app.minutes <= 0 || app.minutes > 16 * 60 || app.minutes > maxAppMinutes) continue;
+    byName.set(canonical, Math.max(byName.get(canonical) ?? 0, app.minutes));
+  }
+  const apps = [...byName.entries()]
+    .map(([name, minutes]) => ({ name, minutes }))
     .sort((a, b) => b.minutes - a.minutes)
     .slice(0, 3);
 
@@ -740,32 +859,53 @@ export function sanitizeParsedResult(parsed: RawParsedScreenTime): ParsedScreenT
     confidence: Math.max(0, Math.min(100, parsed.confidence)),
     layout: parsed.layout ?? "unknown",
     flags: [...new Set([...(parsed.flags ?? []), ...(exceedsHeadline ? (["category_total_exceeds_headline"] as const) : [])])],
+    ratioScope: scrollHours ? ratioScope : null,
   };
 }
 
 export function parseScreenTimeText(rawText: string, ocrConfidence = 0): ParsedScreenTime {
   const layout = guessScreenTimeLayout(rawText);
-  const isWeekView = TOTAL_LABELS.weekly.some((label) => label.test(rawText));
-  const { lines, apps, scrollHours, flags } = analyzeScreenTime(rawText, isWeekView ? 168 : 24);
+  const isWeekView = WEEK_VIEW_HINT.test(rawText);
+  const labels = resolveLabels(isWeekView);
+  const { lines, apps, scrollHours, flags } = analyzeScreenTime(rawText, isWeekView ? 168 : 24, labels);
   const confidence = Math.max(0, Math.min(100, ocrConfidence));
   const confidenceOk = confidence === 0 || confidence >= 45;
 
-  // Average/weekly headlines describe a different time scope than whatever
-  // category values are visible, so the scroll ratio is suppressed for them
-  // (total-only) rather than mixing scopes. Day-scoped totals keep it.
-  const average = resolveAnchoredTotal(lines, "average");
+  // An average headline drives the slider. On a week view, categories and
+  // the grand total share the WEEK scope, so the scroll ratio pairs weekly
+  // scroll with the weekly grand total; without a confidently anchored
+  // grand total the ratio is suppressed (total-only) — never mix scopes.
+  const average = resolveAnchoredTotal(lines, "average", labels);
   if (average && average >= 0.5 && average <= 12 && confidenceOk) {
-    return sanitizeParsedResult({ hours: average, totalHours: average, scrollHours: null, source: "average", apps, confidence, layout, flags });
+    let ratio: { scrollHours: number; totalHours: number } | null = null;
+    if (isWeekView && scrollHours) {
+      const weeklyGrand = resolveAnchoredTotal(lines, "weekly", labels);
+      if (weeklyGrand && weeklyGrand >= 0.5 && weeklyGrand <= 168 && scrollHours <= weeklyGrand) {
+        ratio = { scrollHours, totalHours: weeklyGrand };
+      }
+    }
+    return sanitizeParsedResult({
+      hours: average,
+      totalHours: ratio ? ratio.totalHours : average,
+      scrollHours: ratio ? ratio.scrollHours : null,
+      ratioScope: ratio ? "week" : null,
+      sliderFromScroll: false,
+      source: "average",
+      apps,
+      confidence,
+      layout,
+      flags,
+    });
   }
 
-  const weeklyTotal = resolveAnchoredTotal(lines, "weekly");
+  const weeklyTotal = resolveAnchoredTotal(lines, "weekly", labels);
   if (weeklyTotal && weeklyTotal >= 3.5 && weeklyTotal <= 84 && confidenceOk) {
-    return sanitizeParsedResult({ hours: weeklyTotal / 7, totalHours: weeklyTotal / 7, scrollHours: null, source: "weekly-total", apps, confidence, layout, flags });
+    return sanitizeParsedResult({ hours: weeklyTotal / 7, totalHours: weeklyTotal / 7, scrollHours: null, ratioScope: null, sliderFromScroll: false, source: "weekly-total", apps, confidence, layout, flags });
   }
 
-  const dayTotal = resolveAnchoredTotal(lines, "day");
+  const dayTotal = resolveAnchoredTotal(lines, "day", labels);
   if (dayTotal && dayTotal >= 0.5 && dayTotal <= 12) {
-    return sanitizeParsedResult({ hours: dayTotal, totalHours: dayTotal, scrollHours, source: "day-total", apps, confidence, layout, flags });
+    return sanitizeParsedResult({ hours: dayTotal, totalHours: dayTotal, scrollHours, ratioScope: "day", source: "day-total", apps, confidence, layout, flags });
   }
 
   // Category-derived scroll time with no surviving headline: the headline

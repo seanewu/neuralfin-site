@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { buildScrollTelemetrySummary, checkRateLimit, recordScrollTelemetry, recordScrollTelemetryEvent } from "@/lib/scroll/resultsStore";
+import { buildScrollTelemetrySummary, checkRateLimit, recordScrollTelemetry, recordScrollTelemetryEvent, recordScrollWebviewTelemetry } from "@/lib/scroll/resultsStore";
 import { PARSE_FLAGS, PARSE_OUTCOMES, SCREEN_TIME_LAYOUTS, type ParseFlag, type ParseOutcome, type ScreenTimeLayout } from "@/lib/scroll/ocrSanitizer";
+import { WEBVIEW_ENVS, type WebviewEnv } from "@/lib/scroll/webview";
 
 export const runtime = "nodejs";
 
@@ -20,6 +21,10 @@ function isEvent(value: unknown): value is ParseFlag {
   return typeof value === "string" && PARSE_FLAGS.includes(value as ParseFlag);
 }
 
+function isWebviewEnv(value: unknown): value is WebviewEnv {
+  return typeof value === "string" && WEBVIEW_ENVS.includes(value as WebviewEnv);
+}
+
 export async function POST(request: NextRequest) {
   const ip = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || request.headers.get("x-real-ip") || "unknown";
 
@@ -34,7 +39,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
-  const { layout, outcome, events } = body as { layout?: unknown; outcome?: unknown; events?: unknown };
+  const { layout, outcome, events, env } = body as { layout?: unknown; outcome?: unknown; events?: unknown; env?: unknown };
 
   if (!isLayout(layout) || !isOutcome(outcome)) {
     return NextResponse.json({ error: "Invalid telemetry" }, { status: 400 });
@@ -42,9 +47,13 @@ export async function POST(request: NextRequest) {
   if (events !== undefined && (!Array.isArray(events) || events.length > PARSE_FLAGS.length || !events.every(isEvent))) {
     return NextResponse.json({ error: "Invalid telemetry" }, { status: 400 });
   }
+  if (env !== undefined && !isWebviewEnv(env)) {
+    return NextResponse.json({ error: "Invalid telemetry" }, { status: 400 });
+  }
 
   recordScrollTelemetry(layout, outcome);
   for (const event of events ?? []) recordScrollTelemetryEvent(event);
+  if (env !== undefined && env !== "none") recordScrollWebviewTelemetry(env, outcome);
   return NextResponse.json({ ok: true });
 }
 

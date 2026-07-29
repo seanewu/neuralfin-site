@@ -4,6 +4,7 @@ import { ChangeEvent, KeyboardEvent, type CSSProperties, useEffect, useMemo, use
 import { appLinks } from "@/lib/site";
 import { classifyParseOutcome, parseScreenTimeText, type AppRoast, type ParseFlag, type ParseOutcome, type ScreenTimeLayout } from "@/lib/scroll/ocrSanitizer";
 import { recognizeScreenTime } from "@/lib/scroll/ocrPipeline";
+import { detectWebviewEnv, type WebviewEnv } from "@/lib/scroll/webview";
 import { SCROLL_CAMPAIGN_UTM, SCROLL_DEEP_LINK_PARAMS, SCROLL_STANDINGS, detectScrollLocale, normalPercentile, normalizeScrollLocale, type ScrollLocale, type ScrollRegion } from "@/lib/scroll/campaign";
 import { FLIP_MINUTES_PER_DAY, LADDER_TRACKS, getEducationOutput, getTrackName } from "@/lib/scroll/education";
 import { getArchetypeCopy, getScanStageMessage, getShareCaptionVariant, getTapeNote, type ScanStage } from "@/lib/scroll/personality";
@@ -16,7 +17,7 @@ const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
 
 type Lang = ScrollLocale;
 type TapeRow = { region: ScrollRegion; hours: number; flipped?: boolean };
-type UploadStatus = "idle" | "received" | "read" | "failed";
+type UploadStatus = "idle" | "received" | "read" | "failed" | "partial";
 type ParsedScrollStat = { scrollHours: number; totalHours: number };
 
 const regionOrder: ScrollRegion[] = ["ww", "hk", "sg", "th"];
@@ -69,12 +70,17 @@ const str = {
     dropReceived: "✓ Screenshot received",
     dropRead: (duration: string) => `✓ Read: ${duration}`,
     dropReadScrollDay: (scroll: string, total: string) => `${scroll} of scroll in your ${total} day`,
+    dropReadScrollWeek: (scroll: string, total: string) => `${scroll} of scroll in your ${total} week`,
     dropReadScroll: (scroll: string) => `${scroll} of scroll time`,
     dropCouldnt: "Couldn't read that",
     dropReplace: "Use a different screenshot",
     dropDone: "We read {hours} h/day — look right?",
     dropDay: (duration: string) => `That's today's number (${duration}) — set. For your true average, upload the Week view.`,
     dropApps: "Couldn't read your hours — set them below.",
+    dropPartialChip: "\u2713 Found your app list",
+    dropAppsOnly: "Found your app list — but not your total. Scroll to the top of Screen Time and screenshot the daily average.",
+    longPressSave: "Long-press the image to save it",
+    overlayClose: "Close",
     dropFail: "Couldn't read your hours — set them below.",
     orManual: "or drag it manually",
     priv: "Screenshots are read on your device and never uploaded. App names stay private unless you share them.",
@@ -154,6 +160,8 @@ const str = {
     // DRAFT — native review required
     dropReadScrollDay: (scroll: string, total: string) => `${scroll}滑屏 / ${total}今日總時數`,
     // DRAFT — native review required
+    dropReadScrollWeek: (scroll: string, total: string) => `${scroll}滑屏 / ${total}本週總時長`,
+    // DRAFT — native review required
     dropReadScroll: (scroll: string) => `${scroll}滑屏時間`,
     // DRAFT — native review required
     dropCouldnt: "讀不到這張截圖",
@@ -163,6 +171,14 @@ const str = {
     // DRAFT — native review required
     dropDay: (duration: string) => `這是今天的數字（${duration}）——已設定。若要真實平均，請上傳週視圖。`,
     dropApps: "讀不到你的時數——請在下方手動設定。",
+    // DRAFT — native review required
+    dropPartialChip: "\u2713 已找到你的 App 清單",
+    // DRAFT — native review required
+    dropAppsOnly: "找到你的 App 清單——但沒有總時數。捲到螢幕使用時間最上方，截圖每日平均。",
+    // DRAFT — native review required
+    longPressSave: "長按圖片即可儲存",
+    // DRAFT — native review required
+    overlayClose: "關閉",
     dropFail: "讀不到你的時數——請在下方手動設定。",
     orManual: "或者手動拖一下",
     priv: "截圖只在你的裝置上讀取，永不上傳。App 名稱除非你分享，否則保密。",
@@ -240,12 +256,21 @@ const str = {
     dropReceived: "✓ 已收到截图",
     dropRead: (duration: string) => `✓ 已读取：${duration}`,
     dropReadScrollDay: (scroll: string, total: string) => `${scroll}滑屏 / ${total}今日总时长`,
+    dropReadScrollWeek: (scroll: string, total: string) => `${scroll}滑屏 / ${total}本周总时长`,
     dropReadScroll: (scroll: string) => `${scroll}滑屏时间`,
     dropCouldnt: "读不到这张截图",
     dropReplace: "换一张截图",
     dropDone: "我们读到 {hours} 小时／天——看起来对吗？",
     dropDay: (duration: string) => `这是今天的数字（${duration}）——已设置。要看真实平均值，请上传周视图。`,
     dropApps: "读不到你的时长——请在下面手动设置。",
+    // DRAFT — native review required
+    dropPartialChip: "\u2713 已找到你的 App 列表",
+    // DRAFT — native review required
+    dropAppsOnly: "找到你的 App 列表——但没有总时长。滑到屏幕使用时间最上方，截图日均。",
+    // DRAFT — native review required (standard WeChat save pattern)
+    longPressSave: "长按保存图片",
+    // DRAFT — native review required
+    overlayClose: "关闭",
     dropFail: "读不到你的时长——请在下面手动设置。",
     orManual: "或者手动拖一下",
     priv: "截图只在你的设备上读取，永不上传。App 名称除非你分享，否则保密。",
@@ -322,12 +347,21 @@ const str = {
     dropReceived: "✓ ได้รับสกรีนช็อตแล้ว",
     dropRead: (duration: string) => `✓ อ่านได้: ${duration}`,
     dropReadScrollDay: (scroll: string, total: string) => `ไถไป ${scroll} จากทั้งวัน ${total}`,
+    dropReadScrollWeek: (scroll: string, total: string) => `ไถไป ${scroll} จากทั้งสัปดาห์ ${total}`,
     dropReadScroll: (scroll: string) => `เวลาไถ ${scroll}`,
     dropCouldnt: "อ่านสกรีนช็อตนี้ไม่ได้",
     dropReplace: "ลองสกรีนช็อตอื่น",
     dropDone: "เราอ่านได้ {hours} ชม./วัน — ถูกไหม?",
     dropDay: (duration: string) => `นี่คือตัวเลขของวันนี้ (${duration}) — ตั้งให้แล้ว อยากได้ค่าเฉลี่ยจริง อัปโหลดมุมมองรายสัปดาห์`,
     dropApps: "อ่านชั่วโมงของคุณไม่ได้ — ตั้งเองด้านล่างได้เลย",
+    // DRAFT — native review required
+    dropPartialChip: "\u2713 เจอรายชื่อแอปแล้ว",
+    // DRAFT — native review required
+    dropAppsOnly: "เจอรายชื่อแอปแล้ว — แต่ไม่เจอเวลารวม เลื่อนขึ้นบนสุดของเวลาหน้าจอ แล้วแคปตรงค่าเฉลี่ยต่อวัน",
+    // DRAFT — native review required
+    longPressSave: "กดค้างที่รูปเพื่อบันทึก",
+    // DRAFT — native review required
+    overlayClose: "ปิด",
     dropFail: "อ่านชั่วโมงของคุณไม่ได้ — ตั้งเองด้านล่างได้เลย",
     orManual: "หรือลากเองก็ได้",
     priv: "สกรีนช็อตถูกอ่านบนเครื่องของคุณและไม่มีการอัปโหลด ชื่อแอปเป็นความลับ เว้นแต่คุณจะแชร์เอง",
@@ -419,10 +453,11 @@ function appLink(base: string, hours: number, region: ScrollRegion, verified: bo
 // which degradation paths fire in the wild. Fire-and-forget: telemetry
 // failure can never fail a parse.
 function sendParseTelemetry(layout: ScreenTimeLayout, outcome: ParseOutcome, events: readonly ParseFlag[] = []) {
+  const env: WebviewEnv = detectWebviewEnv(navigator.userAgent);
   void fetch("/api/scroll-telemetry", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(events.length ? { layout, outcome, events } : { layout, outcome }),
+    body: JSON.stringify({ layout, outcome, env, ...(events.length ? { events } : {}) }),
     keepalive: true,
   }).catch(() => undefined);
 }
@@ -455,6 +490,7 @@ export function ScrollCalculator() {
   const [scanNotice, setScanNotice] = useState<string | null>(null);
   const [appRoasts, setAppRoasts] = useState<AppRoast[]>([]);
   const [tapeRows, setTapeRows] = useState<TapeRow[]>(demoTape);
+  const [saveOverlayUrl, setSaveOverlayUrl] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const cardRef = useRef<HTMLDivElement>(null);
   const hoursBlockRef = useRef<HTMLDivElement>(null);
@@ -462,6 +498,7 @@ export function ScrollCalculator() {
   const uploadPreviewRef = useRef<string | null>(null);
   const autoFlipStartedRef = useRef(false);
   const autoFlipTimerRef = useRef<number | null>(null);
+  const saveOverlayRef = useRef<string | null>(null);
 
   const t = str[lang];
   const regionName = t.regions[region];
@@ -494,9 +531,11 @@ export function ScrollCalculator() {
     ? t.dropReceived
     : uploadStatus === "read" && uploadReadDuration
       ? t.dropRead(uploadReadDuration)
-      : uploadStatus === "failed"
-        ? t.dropCouldnt
-      : t.dropTitle;
+      : uploadStatus === "partial"
+        ? t.dropPartialChip
+        : uploadStatus === "failed"
+          ? t.dropCouldnt
+          : t.dropTitle;
 
   const sortedStandings = useMemo(
     () => [...SCROLL_STANDINGS].sort((a, b) => b.flippedPercent - a.flippedPercent),
@@ -540,6 +579,9 @@ export function ScrollCalculator() {
       }
       if (uploadPreviewRef.current !== null) {
         URL.revokeObjectURL(uploadPreviewRef.current);
+      }
+      if (saveOverlayRef.current !== null) {
+        URL.revokeObjectURL(saveOverlayRef.current);
       }
     };
   }, []);
@@ -601,8 +643,9 @@ export function ScrollCalculator() {
         await wait(350);
         const rounded = roundSliderHours(parsed.hours);
         const duration = formatDurationFromHours(parsed.hours, lang);
+        const ratioText = parsed.ratioScope === "week" ? t.dropReadScrollWeek : t.dropReadScrollDay;
         const scrollReadText = parsed.scrollHours && parsed.totalHours
-          ? t.dropReadScrollDay(formatDurationFromHours(parsed.scrollHours, lang), formatDurationFromHours(parsed.totalHours, lang))
+          ? ratioText(formatDurationFromHours(parsed.scrollHours, lang), formatDurationFromHours(parsed.totalHours, lang))
           : parsed.scrollHours
             ? t.dropReadScroll(formatDurationFromHours(parsed.scrollHours, lang))
             : duration;
@@ -621,8 +664,9 @@ export function ScrollCalculator() {
         await wait(500);
         const rounded = roundSliderHours(parsed.hours);
         const duration = formatDurationFromHours(parsed.hours, lang);
+        const ratioText = parsed.ratioScope === "week" ? t.dropReadScrollWeek : t.dropReadScrollDay;
         const scrollReadText = parsed.scrollHours && parsed.totalHours
-          ? t.dropReadScrollDay(formatDurationFromHours(parsed.scrollHours, lang), formatDurationFromHours(parsed.totalHours, lang))
+          ? ratioText(formatDurationFromHours(parsed.scrollHours, lang), formatDurationFromHours(parsed.totalHours, lang))
           : parsed.scrollHours
             ? t.dropReadScroll(formatDurationFromHours(parsed.scrollHours, lang))
             : duration;
@@ -635,13 +679,15 @@ export function ScrollCalculator() {
         setScanNotice(t.dropDay(duration));
         scheduleAutoFlip();
       } else if (parsed.apps.length > 0) {
+        // Partial parse: catalog-gated roasts may show (setAppRoasts above),
+        // the slider stays manual, no badge — but the guidance is specific.
         setScanStage("fail");
         await wait(500);
         setParsedHours(null);
         setParsedScrollStat(null);
         setVerified(false);
-        setUploadStatus("failed");
-        setScanNotice(t.dropApps);
+        setUploadStatus("partial");
+        setScanNotice(t.dropAppsOnly);
       } else {
         setScanStage("fail");
         await wait(500);
@@ -674,6 +720,14 @@ export function ScrollCalculator() {
     }
   }
 
+  function closeSaveOverlay() {
+    if (saveOverlayRef.current !== null) {
+      URL.revokeObjectURL(saveOverlayRef.current);
+      saveOverlayRef.current = null;
+    }
+    setSaveOverlayUrl(null);
+  }
+
   async function saveCard() {
     const node = cardRef.current;
     if (!node) return;
@@ -689,8 +743,18 @@ export function ScrollCalculator() {
       style: { margin: "0" },
     }).catch(() => null);
     if (!blob) return;
-    const image = new File([blob], "my-scroll-pnl.png", { type: "image/png" });
     const text = getShareCaptionVariant(lang, `-${fmt.format(yearly)}h`, rankLine);
+    // In-app browsers (WeChat, LINE, IG/FB) don't reliably support blob
+    // downloads or file share. The universal in-place pattern: show the
+    // rendered PNG full-screen and let the user long-press to save.
+    if (detectWebviewEnv(navigator.userAgent) !== "none") {
+      if (saveOverlayRef.current !== null) URL.revokeObjectURL(saveOverlayRef.current);
+      const overlayUrl = URL.createObjectURL(blob);
+      saveOverlayRef.current = overlayUrl;
+      setSaveOverlayUrl(overlayUrl);
+      return;
+    }
+    const image = new File([blob], "my-scroll-pnl.png", { type: "image/png" });
     const shareData = { files: [image], title: "My Scroll P&L", text };
     if (navigator.canShare?.(shareData)) {
       try {
@@ -945,6 +1009,14 @@ export function ScrollCalculator() {
           <b>NeuralFin Technologies</b> · <span>{t.f1}</span> <span>{t.f2}</span> <span>{t.f3}</span>
         </footer>
       </div>
+
+      {saveOverlayUrl ? (
+        <div className="scroll-save-overlay" role="dialog" aria-modal="true" aria-label={t.longPressSave}>
+          <img src={saveOverlayUrl} alt="My Scroll P&L" />
+          <p>{t.longPressSave}</p>
+          <button type="button" onClick={closeSaveOverlay}>{t.overlayClose}</button>
+        </div>
+      ) : null}
 
       <div className="scroll-sticky">
         <div className="in">

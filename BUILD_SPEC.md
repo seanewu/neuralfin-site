@@ -18,10 +18,41 @@
   zh (社交/娛樂/遊戲) and Thai equivalents.
 - Day vs week scoping: an average or weekly headline drives the slider and
   badge, but the scroll-of-total ratio is computed only from same-scoped
-  values. When category values can't be confidently matched to the
-  headline's scope (average/weekly sources), the parser falls back to
-  total-only rather than showing a mismatched ratio; day-scoped totals keep
-  the ratio.
+  values. On a WEEK view (detected from weekly labels, 每周/每週 tab text,
+  or an average headline — iOS only shows "daily average"/日均 on week
+  views), categories and the grand total (总屏幕时间/Total Screen Time —
+  scope-dependent: weekly on week views, day total on day views) share the
+  week scope: the ratio pairs weekly scroll with the weekly grand total
+  (`ratioScope: "week"`) while the slider keeps the daily average. Without
+  a confidently anchored grand total the ratio is suppressed (total-only);
+  day-scoped totals keep the day ratio.
+- Update-timestamp metadata lines (更新于/更新於/Updated…) are inert: their
+  day words must not anchor scopes and their clock times ("09:51") must
+  never parse as durations — a real device promoted 更新于：今天 09:51 to a
+  9h51m day headline before this guard.
+- Chart furniture can never become a value. Anchoring trust order for a
+  label: same-line value → zip-paired value → a composite value LEADING the
+  adjacent line (headline values are often polluted by delta text —
+  "5h 20m ⬇ 25% from last week" — and fail the duration-only check) → a
+  composite duration-only line in the window. Bare tokens (axis ticks
+  "10h"/"12小时", "0") are never composite so never eligible; "avg"/平均
+  dashed-line labels carry no value; lines containing a percentage
+  (comparison furniture) are disqualified from label duty. If no anchored
+  pair exists, the parse fails to manual — a floating fragment is never
+  promoted, and the verified badge can only ever fire on an anchored
+  average/weekly value. Known tradeoff: a bare-minutes headline on its own
+  line ("45m") without a same-line/zip anchor is not promotable either.
+- iOS "Limits" rows duplicate app names ("Instagram 1 hr"); duplicate
+  canonical apps keep the LARGEST minutes so a limit row never shadows the
+  usage row.
+- Category taxonomy (audited across Apple + Android in en/zh-Hant/zh-Hans/
+  th): scroll = Social, Video, Entertainment, Games. Excluded, with joined
+  names as single units: Productivity & Finance (效率与财务/生產力與財務/
+  ประสิทธิภาพและการเงิน), Information & Reading (信息与阅读/資訊與閱讀/
+  ข้อมูลและการอ่าน), Shopping & Food (购物与美食/購物與美食/
+  ช็อปปิ้งและอาหาร), Health & Fitness (健康与健身/健康與健身/
+  สุขภาพและฟิตเนส), Creativity, Education, Travel (旅行/旅遊), Utilities,
+  Communication, Other.
 - Duration token tolerance (headlines, app rows, and category values alike):
   "N h M m", "N hr M min", "N hr, M min", "Nh Mm", "N:MM",
   "N 小時 M 分鐘", and Thai equivalents.
@@ -56,6 +87,32 @@
   "couldn't read" path with the manual slider. `sanitizeParsedResult` gates
   every value that reaches the UI or the share card.
 
+## In-App Browser (Webview) Support Matrix
+
+Detection is UA-based (`lib/scroll/webview.ts`): `wechat` (MicroMessenger),
+`line`, `instagram`, `facebook` (FBAN/FBAV/FB_IAB), else `none`. Critical
+paths and their behavior per environment:
+
+| Path | Regular browser | WeChat | LINE / IG / FB in-app |
+|---|---|---|---|
+| File input / upload | native picker | works (photo library) | works |
+| tesseract WASM OCR | works | works (WKWebView/X5 support WASM); on failure → manual slider + notice, telemetry `outcome=failed` with env tag — never a crash | same |
+| Card PNG export (html-to-image) | works | works (same-renderer SVG foreignObject) | works |
+| `navigator.share` with files | used when available | unavailable — skipped | unreliable — skipped |
+| Blob `<a download>` | fallback path | **not reliably supported** | unreliable |
+| Save flow | share → download + caption to clipboard | **full-screen `<img>` overlay + "长按保存图片" (long-press to save — the standard WeChat pattern), localized ×4** | same overlay fallback |
+
+No "open in browser" hint is shown: every path works in-place (the overlay
+makes saving work without leaving the webview), which is the preference —
+WeChat users don't leave WeChat. Revisit only if telemetry shows a webview
+where OCR consistently fails.
+
+Partial-parse guidance: when app rows parse but no headline/average anchors,
+the UI shows a specific state ("Found your app list — but not your total.
+Scroll to the top of Screen Time and screenshot the daily average", ×4
+locales) with catalog-gated roasts populated, manual slider, no badge —
+headline promotion rules unchanged.
+
 ## Layout Telemetry — OEM Expansion Mechanism
 
 One anonymous, aggregate-only report per parse attempt:
@@ -66,7 +123,9 @@ fixed enum of degradation flags: `ambiguous_duration_dropped`,
 `category_total_exceeds_headline`, `restricted_pass_failed`. The endpoint
 accepts these enum fields and nothing else — no image data, no OCR text, no
 app names — and the store keeps only counters (no rows, timestamps, or
-IPs). Counters go through `ScrollTelemetryStorage`
+IPs). An optional `env` field (webview enum: wechat|line|instagram|
+facebook|none) tags which in-app browser a parse ran in — counters only,
+no new data categories. Counters go through `ScrollTelemetryStorage`
 (`lib/scroll/resultsStore.ts`), a swappable interface whose in-memory
 backend resets on serverless recycling; the durable-store migration swaps
 in the KV backend at `setScrollTelemetryStorage` without touching call
